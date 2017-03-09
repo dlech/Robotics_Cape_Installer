@@ -2,8 +2,8 @@
 
 CC		:= gcc
 LINKER		:= gcc -o
-CFLAGS		:= -c -Wall -O2
-LFLAGS		:= -L ../../libraries -lm -lrt -lpthread -lroboticscape
+CFLAGS		:= -c -Wall -O2 $(PKG_CFLAGS)
+LFLAGS		:= -L ../../libraries -lm -lrt -lpthread -lroboticscape $(PKG_LIBS)
 
 SOURCES		:= $(wildcard *.c)
 INCLUDES	:= $(wildcard *.h)

@@ -4,6 +4,8 @@
 * Reference solution for balancing EduMiP
 *******************************************************************************/
 
+#include <libevdev/libevdev.h>
+
 #include "../../libraries/rc_usefulincludes.h"
 #include "../../libraries/roboticscape.h"
 
@@ -89,6 +91,7 @@ core_state_t cstate;
 setpoint_t setpoint;
 rc_filter_t D1, D2, D3;
 rc_imu_data_t imu_data;
+struct libevdev *evdev;
 
 /*******************************************************************************
 * main()
@@ -96,6 +99,16 @@ rc_imu_data_t imu_data;
 * Initialize the filters, IMU, threads, & wait until shut down
 *******************************************************************************/
 int main(){
+	int event_fd;
+	int err;
+
+	event_fd = open("/dev/input/event1", O_RDONLY|O_NONBLOCK);
+	err = libevdev_new_from_fd(event_fd, &evdev);
+	if (err < 0) {
+		fprintf(stderr,"Failed to init ev3dev: %s\n", strerror(-err));
+		return -1;
+	}
+
 	// make sure everything initializes first
 	if(rc_initialize()){
 		fprintf(stderr,"ERROR: failed to run rc_initialize(), are you root?\n");
@@ -212,8 +225,11 @@ int main(){
 	rc_free_filter(&D3);
 	rc_power_off_imu();
 	rc_cleanup();
+	libevdev_free(evdev);
 	return 0;
 }
+
+#define NORMALIZE_ABS(a,v) (2.0 * (v - a##min) / (a##max - a##min) - 1.0)
 
 /*******************************************************************************
 * void* setpoint_manager(void* ptr)
@@ -224,6 +240,14 @@ int main(){
 *******************************************************************************/
 void* setpoint_manager(void* ptr){
 	float drive_stick, turn_stick; // dsm input sticks
+	struct input_event evt;
+	int xmin, xmax, ymin, ymax;
+	int ret;
+
+	xmin = libevdev_get_abs_minimum(evdev, ABS_X);
+	xmax = libevdev_get_abs_maximum(evdev, ABS_X);
+	ymin = libevdev_get_abs_minimum(evdev, ABS_Y);
+	ymax = libevdev_get_abs_maximum(evdev, ABS_Y);
 
 	// wait for IMU to settle
 	disarm_controller();
@@ -233,6 +257,7 @@ void* setpoint_manager(void* ptr){
 	rc_set_led(GREEN,1);
 	
 	while(rc_get_state()!=EXITING){
+
 		// sleep at beginning of loop so we can use the 'continue' statement
 		rc_usleep(1000000/SETPOINT_MANAGER_HZ); 
 		
@@ -249,7 +274,7 @@ void* setpoint_manager(void* ptr){
 			} 
 			else continue;
 		}
-	
+#if 0
 		// if dsm is active, update the setpoint rates
 		if(rc_is_new_dsm_data()){
 			// Read normalized (+-1) inputs from RC radio stick and multiply by 
@@ -285,8 +310,44 @@ void* setpoint_manager(void* ptr){
 			setpoint.gamma_dot = 0;
 			continue;
 		}
-	}
+#endif
 
+		while (libevdev_has_event_pending(evdev) == 1) {
+			ret = libevdev_next_event(evdev, LIBEVDEV_READ_FLAG_NORMAL, &evt);
+			if (ret == LIBEVDEV_READ_STATUS_SUCCESS) {
+				if (libevdev_event_is_code(&evt, EV_ABS, ABS_X)) {
+					turn_stick = -NORMALIZE_ABS(x, evt.value);
+				}
+				else if (libevdev_event_is_code(&evt, EV_ABS, ABS_Y)) {
+					drive_stick = -NORMALIZE_ABS(y, evt.value);
+				}
+				else {
+					break;
+				}
+				
+				// saturate the inputs to avoid possible erratic behavior
+				rc_saturate_float(&drive_stick,-1,1);
+				rc_saturate_float(&turn_stick,-1,1);
+				
+				// use a small deadzone to prevent slow drifts in position
+				if(fabs(drive_stick)<DSM_DEAD_ZONE) drive_stick = 0.0;
+				if(fabs(turn_stick)<DSM_DEAD_ZONE)  turn_stick  = 0.0;
+
+				// translate normalized user input to real setpoint values
+				switch(setpoint.drive_mode){
+				case NOVICE:
+					setpoint.phi_dot   = DRIVE_RATE_NOVICE * drive_stick;
+					setpoint.gamma_dot =  TURN_RATE_NOVICE * turn_stick;
+					break;
+				case ADVANCED:
+					setpoint.phi_dot   = DRIVE_RATE_ADVANCED * drive_stick;
+					setpoint.gamma_dot = TURN_RATE_ADVANCED  * turn_stick;
+					break;
+				default: break;
+				}
+			}
+		}
+	}
 	// if state becomes EXITING the above loop exists and we disarm here
 	disarm_controller();
 	return NULL;
